@@ -1,0 +1,73 @@
+name: CI WorkFlow
+on:
+  workflow_call:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-node@v2
+        with:
+          node-version: 16.13.1
+          cache: "npm"
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.1
+      - name: Copy .env
+        run: echo "$CI_ENV_FILE" > .env
+        env:
+          CI_ENV_FILE: ${{ secrets.CI_ENV_FILE }}
+      - name: Copy cypress.json
+        run: cp cypress.json.ci cypress.json
+      - name: Create Database
+        run: |
+          sudo systemctl start mysql
+          mysql --user="root" --password="root" -e "CREATE DATABASE acapedia_submitter_test_db character set UTF8mb4 collate utf8mb4_bin;"
+          mysql --user="root" --password="root" -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'root'";
+      - name: Get composer cache directory
+        id: composer-cache
+        run: echo "::set-output name=dir::$(composer config cache-files-dir)"
+      - name: Restore Cache composer dependencies
+        uses: actions/cache@v2
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer
+      - name: Authenticating Nova
+        run: composer config http-basic.nova.laravel.com ${{ secrets.NOVA_USERNAME }} ${{ secrets.NOVA_PASSWORD }}
+      - name: Install Composer Dependencies
+        run: composer install --prefer-dist
+      - name: Compose validations
+        run: composer install -d ./Business/Entities/Validations
+      - name: Storage symlink
+        run: php artisan storage:link
+      - name: Generate key
+        run: php artisan key:generate
+      - name: Database Migration
+        run: php artisan migrate:fresh --seed
+      - name: Run Laravel Server
+        run: php artisan serve --host=127.0.0.1 &
+      - name: Install Node Dependencies
+        run: npm install
+      - name: Publish nova resources
+        run: |
+          php artisan nova:publish
+          git checkout -- config/nova.php
+      - name: Install custom nova resources install
+        run: cd nova-components/KeywordEditResponse && npm install
+      - name: Install custom nova cards install
+        run: cd nova-components/LimitSignups && npm install
+      - name: Compile dev files
+        run: npm run dev
+      - name: Execute tests (Unit and Feature tests) using PHPUnit
+        run: ./vendor/bin/pest --exclude-group=normalize-data --coverage --min=18.49 --coverage-html ./coverage --ci
+      - name: Upload coverage report as artifact
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage
+          path: ./coverage
+      - name: Execute tests
+        run: npm run cy:test -- --record "$CYPRESS_RECORD_KEY"
+        env:
+          CYPRESS_RECORD_KEY: ${{ secrets.CYPRESS_RECORD_KEY }}
